@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from dash import Dash, Input, Output, dcc, html, dash_table
 
 # =========================================================
-# 1) CSV osadzone bezpośrednio w kodzie
+# 1) CSV
 # =========================================================
 
 MW_CSV = """year,conflict,location,lat,lon,source_type,weight
@@ -58,7 +58,6 @@ REAL_CONFLICTS_CSV = """year,conflict,location,lat,lon,source_type,weight
 mw_df = pd.read_csv(StringIO(MW_CSV))
 real_df = pd.read_csv(StringIO(REAL_CONFLICTS_CSV))
 
-# Ujednolicenie typów
 for df in (mw_df, real_df):
     df["year"] = df["year"].astype(int)
     df["lat"] = df["lat"].astype(float)
@@ -72,7 +71,7 @@ ALL_YEARS = list(range(1999, 2021))
 
 
 # =========================================================
-# 2) Pomocnicze funkcje
+# 2) Dane
 # =========================================================
 
 def filter_df(year_min, year_max, show_mw=True, show_real=True):
@@ -80,7 +79,6 @@ def filter_df(year_min, year_max, show_mw=True, show_real=True):
 
     if show_mw:
         parts.append(mw_df[(mw_df["year"] >= year_min) & (mw_df["year"] <= year_max)])
-
     if show_real:
         parts.append(real_df[(real_df["year"] >= year_min) & (real_df["year"] <= year_max)])
 
@@ -88,258 +86,327 @@ def filter_df(year_min, year_max, show_mw=True, show_real=True):
         return pd.DataFrame(columns=["year", "conflict", "location", "lat", "lon", "source_type", "weight", "label"])
 
     out = pd.concat(parts, ignore_index=True).copy()
-
     out["label"] = (
         out["source_type"] + " | "
         + out["year"].astype(str) + " | "
         + out["conflict"] + " | "
         + out["location"]
     )
-
     return out.sort_values(["year", "source_type", "conflict", "location"]).reset_index(drop=True)
 
 
-def make_globe_figure(df, show_heatmap=True):
+# =========================================================
+# 3) Styl globu "jak na screenie"
+# =========================================================
+
+def add_glow_layer(fig, df, name, color, size_mul, opacity, showlegend=False):
+    if df.empty:
+        return
+
+    fig.add_trace(
+        go.Scattergeo(
+            lon=df["lon"],
+            lat=df["lat"],
+            mode="markers",
+            hoverinfo="skip",
+            showlegend=showlegend,
+            name=name,
+            marker=dict(
+                size=(df["weight"] * size_mul).clip(lower=14, upper=60),
+                color=color,
+                opacity=opacity,
+                line=dict(width=0),
+            ),
+        )
+    )
+
+
+def add_points_layer(fig, df, name, color):
+    if df.empty:
+        return
+
+    fig.add_trace(
+        go.Scattergeo(
+            lon=df["lon"],
+            lat=df["lat"],
+            mode="markers+text",
+            text=df["year"].astype(str),
+            textposition="top center",
+            name=name,
+            customdata=df[["conflict", "location", "year", "weight", "source_type"]],
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Lokalizacja: %{customdata[1]}<br>"
+                "Rok: %{customdata[2]}<br>"
+                "Typ: %{customdata[4]}<br>"
+                "Waga: %{customdata[3]}<extra></extra>"
+            ),
+            textfont=dict(color="rgba(255,220,160,0.95)", size=10),
+            marker=dict(
+                size=(df["weight"] * 1.9 + 4).clip(lower=6, upper=22),
+                color=color,
+                opacity=0.98,
+                line=dict(color="rgba(255,245,220,0.9)", width=1),
+            ),
+        )
+    )
+
+
+def make_globe_figure(df, show_glow=True, show_labels=True):
     fig = go.Figure()
 
-    # Pseudo-heatmap: duże półprzezroczyste okręgi pod punktami.
-    # To nie jest "true heatmap", ale działa stabilnie na globie Scattergeo.
-    if show_heatmap and not df.empty:
+    mw = df[df["source_type"] == "MW"]
+    real = df[df["source_type"] == "REAL"]
+
+    # Warstwy glow - od największej i najbardziej przezroczystej
+    if show_glow:
+        add_glow_layer(fig, df, "Shockwave", "rgba(255,120,20,0.10)", 8.0, 0.10, False)
+        add_glow_layer(fig, df, "Heat glow", "rgba(255,90,0,0.16)", 5.8, 0.16, False)
+        add_glow_layer(fig, df, "Core glow", "rgba(255,180,60,0.20)", 3.8, 0.20, False)
+
+    # Delikatne połączenia między punktami tego samego typu - daje efekt pęknięć/sieci
+    def add_link_lines(subdf, color):
+        if len(subdf) < 2:
+            return
+
+        subdf = subdf.sort_values(["year", "weight"], ascending=[True, False]).reset_index(drop=True)
+        line_lons = []
+        line_lats = []
+
+        for i in range(len(subdf) - 1):
+            line_lons.extend([subdf.loc[i, "lon"], subdf.loc[i + 1, "lon"], None])
+            line_lats.extend([subdf.loc[i, "lat"], subdf.loc[i + 1, "lat"], None])
+
         fig.add_trace(
             go.Scattergeo(
-                lon=df["lon"],
-                lat=df["lat"],
-                mode="markers",
-                text=df["label"],
+                lon=line_lons,
+                lat=line_lats,
+                mode="lines",
                 hoverinfo="skip",
-                showlegend=True,
-                name="Heat intensity",
-                marker=dict(
-                    size=(df["weight"] * 6).clip(lower=10, upper=45),
-                    color=df["weight"],
-                    cmin=1,
-                    cmax=10,
-                    colorscale="RdYlBu_r",
-                    opacity=0.18,
-                    line=dict(width=0),
-                ),
+                showlegend=False,
+                line=dict(width=1.2, color=color),
+                opacity=0.45,
             )
         )
 
-    mw_points = df[df["source_type"] == "MW"]
-    real_points = df[df["source_type"] == "REAL"]
+    add_link_lines(real, "rgba(255,110,40,0.55)")
+    add_link_lines(mw, "rgba(255,190,70,0.45)")
 
-    if not mw_points.empty:
-        fig.add_trace(
-            go.Scattergeo(
-                lon=mw_points["lon"],
-                lat=mw_points["lat"],
-                mode="markers+text",
-                text=mw_points["year"].astype(str),
-                textposition="top center",
-                customdata=mw_points[["conflict", "location", "year", "weight", "source_type"]],
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "Lokalizacja: %{customdata[1]}<br>"
-                    "Rok: %{customdata[2]}<br>"
-                    "Typ: %{customdata[4]}<br>"
-                    "Waga: %{customdata[3]}<extra></extra>"
-                ),
-                name="MW",
-                marker=dict(
-                    size=(mw_points["weight"] * 2.2 + 4).clip(lower=7, upper=24),
-                    color="#ffcc00",
-                    opacity=0.95,
-                    line=dict(color="white", width=1),
-                ),
-            )
-        )
+    # Właściwe punkty
+    add_points_layer(fig, mw, "MW", "#ffcf4a")
+    add_points_layer(fig, real, "REAL", "#ff5a1f")
 
-    if not real_points.empty:
-        fig.add_trace(
-            go.Scattergeo(
-                lon=real_points["lon"],
-                lat=real_points["lat"],
-                mode="markers+text",
-                text=real_points["year"].astype(str),
-                textposition="top center",
-                customdata=real_points[["conflict", "location", "year", "weight", "source_type"]],
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "Lokalizacja: %{customdata[1]}<br>"
-                    "Rok: %{customdata[2]}<br>"
-                    "Typ: %{customdata[4]}<br>"
-                    "Waga: %{customdata[3]}<extra></extra>"
-                ),
-                name="REAL",
-                marker=dict(
-                    size=(real_points["weight"] * 2.2 + 4).clip(lower=7, upper=24),
-                    color="#ff3b30",
-                    opacity=0.95,
-                    line=dict(color="white", width=1),
-                ),
-            )
+    # Dodatkowa centralna poświata planety
+    fig.add_trace(
+        go.Scattergeo(
+            lon=[25],
+            lat=[20],
+            mode="markers",
+            hoverinfo="skip",
+            showlegend=False,
+            marker=dict(
+                size=240,
+                color="rgba(255,140,50,0.05)",
+                line=dict(width=0),
+            ),
         )
+    )
+
+    text_mode = "text" if show_labels else "none"
 
     fig.update_geos(
         projection_type="orthographic",
+        projection_rotation=dict(lon=20, lat=15, roll=0),
+        showframe=False,
+        showcoastlines=False,
+        showcountries=False,
         showland=True,
-        landcolor="rgb(28, 37, 54)",
+        landcolor="rgb(18, 22, 30)",
         showocean=True,
-        oceancolor="rgb(5, 12, 24)",
-        showcountries=True,
-        countrycolor="rgb(140, 160, 180)",
-        coastlinecolor="rgb(180, 200, 220)",
-        showcoastlines=True,
-        showlakes=True,
-        lakecolor="rgb(5, 12, 24)",
-        bgcolor="rgb(2, 6, 16)",
+        oceancolor="rgb(8, 12, 20)",
+        showlakes=False,
+        bgcolor="rgba(0,0,0,0)",
+        lataxis_showgrid=False,
+        lonaxis_showgrid=False,
     )
 
+    # "Gwiazdy" w tle jako adnotacje nie wyglądają dobrze,
+    # więc tło robimy bardzo ciemne + radialny klimat przez papier/layout.
     fig.update_layout(
-        title="Konflikty MW + realne konflikty (1999–2020)",
-        paper_bgcolor="rgb(2, 6, 16)",
-        plot_bgcolor="rgb(2, 6, 16)",
-        font=dict(color="white"),
-        legend=dict(
-            bgcolor="rgba(0,0,0,0.25)",
-            borderwidth=0,
-            x=0.01,
-            y=0.99,
+        title=dict(
+            text="Konflikty MW + realne konflikty",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=24, color="rgba(255,220,170,0.95)")
         ),
-        margin=dict(l=10, r=10, t=50, b=10),
-        height=760,
+        paper_bgcolor="#020202",
+        plot_bgcolor="#020202",
+        font=dict(color="white"),
+        margin=dict(l=0, r=0, t=60, b=0),
+        height=820,
+        legend=dict(
+            bgcolor="rgba(0,0,0,0.35)",
+            bordercolor="rgba(255,120,40,0.18)",
+            borderwidth=1,
+            x=0.02,
+            y=0.98,
+            font=dict(color="rgba(255,230,200,0.95)")
+        ),
     )
+
+    # Ukrycie domyślnej warstwy tekstowej jeśli trzeba
+    if not show_labels:
+        for trace in fig.data:
+            if getattr(trace, "mode", "") == "markers+text":
+                trace.text = None
 
     return fig
 
 
 # =========================================================
-# 3) Aplikacja Dash
+# 4) Dash
 # =========================================================
 
 app = Dash(__name__)
-app.title = "Konflikty MW + realne konflikty"
+app.title = "MW Globe"
 
 initial_df = filter_df(1999, 2020, True, True)
 
 app.layout = html.Div(
     style={
-        "backgroundColor": "#08111f",
+        "background": "radial-gradient(circle at 30% 35%, #3a1d08 0%, #120a05 18%, #040404 42%, #010101 100%)",
         "minHeight": "100vh",
-        "padding": "18px",
+        "padding": "16px",
         "fontFamily": "Arial, sans-serif",
         "color": "white",
     },
     children=[
-        html.H2("Konflikty MW + realne konflikty (1999–2020)"),
         html.Div(
             style={
-                "display": "grid",
-                "gridTemplateColumns": "1fr",
-                "gap": "14px",
-                "marginBottom": "12px",
+                "maxWidth": "1400px",
+                "margin": "0 auto",
             },
             children=[
                 html.Div(
-                    style={"maxWidth": "900px"},
+                    style={
+                        "padding": "14px 18px",
+                        "marginBottom": "14px",
+                        "border": "1px solid rgba(255,120,40,0.22)",
+                        "backgroundColor": "rgba(0,0,0,0.28)",
+                        "backdropFilter": "blur(2px)",
+                        "boxShadow": "0 0 24px rgba(255,120,40,0.08)",
+                    },
                     children=[
-                        html.Label("Zakres lat", style={"display": "block", "marginBottom": "8px"}),
-                        dcc.RangeSlider(
-                            id="year-range",
-                            min=1999,
-                            max=2020,
-                            step=1,
-                            value=[1999, 2020],
-                            marks={y: str(y) for y in ALL_YEARS},
-                            allowCross=False,
-                            tooltip={"placement": "bottom", "always_visible": False},
+                        html.H2(
+                            "Konflikty MW + realne konflikty",
+                            style={"margin": "0 0 12px 0", "color": "#ffd6a8"}
+                        ),
+                        html.Div(
+                            style={"marginBottom": "10px"},
+                            children=[
+                                html.Label("Zakres lat", style={"display": "block", "marginBottom": "8px", "color": "#ffd6a8"}),
+                                dcc.RangeSlider(
+                                    id="year-range",
+                                    min=1999,
+                                    max=2020,
+                                    step=1,
+                                    value=[1999, 2020],
+                                    marks={y: str(y) for y in ALL_YEARS},
+                                    allowCross=False,
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            style={"display": "flex", "gap": "30px", "flexWrap": "wrap"},
+                            children=[
+                                html.Div([
+                                    html.Div("Źródła", style={"marginBottom": "6px", "color": "#ffd6a8"}),
+                                    dcc.Checklist(
+                                        id="source-checklist",
+                                        options=[
+                                            {"label": " MW", "value": "MW"},
+                                            {"label": " REAL", "value": "REAL"},
+                                        ],
+                                        value=["MW", "REAL"],
+                                        inline=True,
+                                        inputStyle={"marginRight": "6px", "marginLeft": "10px"},
+                                    ),
+                                ]),
+                                html.Div([
+                                    html.Div("Efekty", style={"marginBottom": "6px", "color": "#ffd6a8"}),
+                                    dcc.Checklist(
+                                        id="effects-checklist",
+                                        options=[
+                                            {"label": " glow", "value": "GLOW"},
+                                            {"label": " lata nad punktami", "value": "LABELS"},
+                                        ],
+                                        value=["GLOW", "LABELS"],
+                                        inline=True,
+                                        inputStyle={"marginRight": "6px", "marginLeft": "10px"},
+                                    ),
+                                ]),
+                            ],
                         ),
                     ],
+                ),
+                dcc.Graph(
+                    id="globe-graph",
+                    figure=make_globe_figure(initial_df, show_glow=True, show_labels=True),
+                    config={
+                        "displayModeBar": True,
+                        "scrollZoom": True,
+                    },
+                    style={
+                        "border": "1px solid rgba(255,120,40,0.18)",
+                        "backgroundColor": "rgba(0,0,0,0.20)",
+                        "boxShadow": "0 0 30px rgba(255,120,40,0.08)",
+                    },
                 ),
                 html.Div(
                     style={
-                        "display": "flex",
-                        "flexWrap": "wrap",
-                        "gap": "28px",
-                        "alignItems": "center",
+                        "marginTop": "16px",
+                        "padding": "12px",
+                        "border": "1px solid rgba(255,120,40,0.18)",
+                        "backgroundColor": "rgba(0,0,0,0.28)",
                     },
                     children=[
-                        html.Div(
-                            children=[
-                                html.Div("Źródła", style={"marginBottom": "6px"}),
-                                dcc.Checklist(
-                                    id="source-checklist",
-                                    options=[
-                                        {"label": " MW", "value": "MW"},
-                                        {"label": " REAL", "value": "REAL"},
-                                    ],
-                                    value=["MW", "REAL"],
-                                    inline=True,
-                                    inputStyle={"marginRight": "6px", "marginLeft": "10px"},
-                                ),
-                            ]
-                        ),
-                        html.Div(
-                            children=[
-                                html.Div("Warstwy", style={"marginBottom": "6px"}),
-                                dcc.Checklist(
-                                    id="layer-checklist",
-                                    options=[
-                                        {"label": " pseudo-heatmap", "value": "HEAT"},
-                                    ],
-                                    value=["HEAT"],
-                                    inline=True,
-                                    inputStyle={"marginRight": "6px", "marginLeft": "10px"},
-                                ),
-                            ]
+                        html.H3("Tabela filtrowanych rekordów", style={"color": "#ffd6a8"}),
+                        dash_table.DataTable(
+                            id="records-table",
+                            columns=[
+                                {"name": "year", "id": "year"},
+                                {"name": "source_type", "id": "source_type"},
+                                {"name": "conflict", "id": "conflict"},
+                                {"name": "location", "id": "location"},
+                                {"name": "lat", "id": "lat"},
+                                {"name": "lon", "id": "lon"},
+                                {"name": "weight", "id": "weight"},
+                            ],
+                            data=initial_df.to_dict("records"),
+                            page_size=15,
+                            sort_action="native",
+                            filter_action="native",
+                            style_table={"overflowX": "auto"},
+                            style_header={
+                                "backgroundColor": "#2a140b",
+                                "color": "#ffd6a8",
+                                "fontWeight": "bold",
+                                "border": "1px solid #5a2b14",
+                            },
+                            style_cell={
+                                "backgroundColor": "#0a0a0a",
+                                "color": "white",
+                                "textAlign": "left",
+                                "padding": "8px",
+                                "border": "1px solid #2a140b",
+                                "whiteSpace": "normal",
+                                "height": "auto",
+                            },
                         ),
                     ],
                 ),
             ],
-        ),
-        dcc.Graph(
-            id="globe-graph",
-            figure=make_globe_figure(initial_df, show_heatmap=True),
-            config={
-                "displayModeBar": True,
-                "scrollZoom": True,
-            },
-        ),
-        html.H3("Tabela filtrowanych rekordów"),
-        dash_table.DataTable(
-            id="records-table",
-            columns=[
-                {"name": "year", "id": "year"},
-                {"name": "source_type", "id": "source_type"},
-                {"name": "conflict", "id": "conflict"},
-                {"name": "location", "id": "location"},
-                {"name": "lat", "id": "lat"},
-                {"name": "lon", "id": "lon"},
-                {"name": "weight", "id": "weight"},
-            ],
-            data=initial_df.to_dict("records"),
-            page_size=15,
-            sort_action="native",
-            filter_action="native",
-            style_as_list_view=False,
-            style_table={"overflowX": "auto"},
-            style_header={
-                "backgroundColor": "#12233d",
-                "color": "white",
-                "fontWeight": "bold",
-                "border": "1px solid #1f3557",
-            },
-            style_cell={
-                "backgroundColor": "#0b1729",
-                "color": "white",
-                "textAlign": "left",
-                "padding": "8px",
-                "border": "1px solid #1f3557",
-                "whiteSpace": "normal",
-                "height": "auto",
-            },
-        ),
+        )
     ],
 )
 
@@ -349,23 +416,17 @@ app.layout = html.Div(
     Output("records-table", "data"),
     Input("year-range", "value"),
     Input("source-checklist", "value"),
-    Input("layer-checklist", "value"),
+    Input("effects-checklist", "value"),
 )
-def update_view(year_range, source_values, layer_values):
+def update_view(year_range, source_values, effect_values):
     year_min, year_max = year_range
-
     show_mw = "MW" in source_values
     show_real = "REAL" in source_values
-    show_heatmap = "HEAT" in layer_values
+    show_glow = "GLOW" in effect_values
+    show_labels = "LABELS" in effect_values
 
-    df = filter_df(
-        year_min=year_min,
-        year_max=year_max,
-        show_mw=show_mw,
-        show_real=show_real,
-    )
-
-    fig = make_globe_figure(df, show_heatmap=show_heatmap)
+    df = filter_df(year_min, year_max, show_mw=show_mw, show_real=show_real)
+    fig = make_globe_figure(df, show_glow=show_glow, show_labels=show_labels)
     return fig, df.to_dict("records")
 
 
@@ -375,6 +436,6 @@ def open_browser():
 
 if __name__ == "__main__":
     print("Uruchamianie aplikacji...")
-    print("Otwórz w przeglądarce: http://127.0.0.1:8050")
+    print("Adres: http://127.0.0.1:8050")
     Timer(1.2, open_browser).start()
     app.run(debug=True)
